@@ -93,6 +93,11 @@ run "onboards_and_assigns_windows_and_linux" {
     condition     = azurerm_resource_group_policy_assignment.this["linux_cis"].enforce == true
     error_message = "Default enforcement_mode should map to enforce = true."
   }
+
+  assert {
+    condition     = azurerm_resource_group_policy_assignment.this["linux_cis"].parameters == jsonencode({ BaselineSettings = { value = "" } })
+    error_message = "The linux_cis builtin should default the required BaselineSettings parameter to the stock baseline (empty string), or the service rejects the assignment with MissingPolicyParameter."
+  }
 }
 
 run "report_only_maps_to_enforce_false" {

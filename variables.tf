@@ -93,7 +93,9 @@ variable "policy_assignments" {
     audit or enforce baselines across every machine in a resource group, subscription or management
     group. Point each entry at the curated built in catalog with builtin (for example linux_cis,
     windows_cis, linux_compute_baseline, windows_compute_baseline, prereq_system_assigned), or set
-    policy_definition_id / policy_set_definition_id explicitly. enforcement_mode defaults to Default;
+    policy_definition_id / policy_set_definition_id explicitly. Catalog definitions with required
+    parameters are defaulted by the module (linux_cis: BaselineSettings, an empty string, the stock
+    CIS baseline); anything in parameters overrides the default per key. enforcement_mode defaults to Default;
     set it to DoNotEnforce for report only. A system assigned identity plus remediation role grants
     are wired for definitions that deploy (DeployIfNotExists).
   EOT

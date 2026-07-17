@@ -22,6 +22,22 @@ locals {
     Linux   = { publisher = "Microsoft.GuestConfiguration", type = "ConfigurationForLinux", version = "1.26" }
   }
 
+  # Catalog entries whose definition declares REQUIRED parameters the service will not default,
+  # verified live: linux_cis (2.1.0) declares BaselineSettings with no defaultValue and rejects an
+  # assignment without it (MissingPolicyParameter). An empty string selects the stock CIS baseline
+  # (the windows_cis definition declares exactly that as its default); "{}" is the one poisonous
+  # value (it can never satisfy the definition's existence condition). Caller parameters win per key.
+  builtin_default_parameters = {
+    linux_cis = { BaselineSettings = { value = "" } }
+  }
+
+  policy_assignment_parameters = {
+    for k, a in var.policy_assignments : k => merge(
+      a.builtin != null ? lookup(local.builtin_default_parameters, a.builtin, {}) : {},
+      a.parameters != null ? a.parameters : {},
+    )
+  }
+
   # Resolve each scoped assignment to a concrete definition (or set) id: catalog key wins, then an
   # explicit definition id, then an explicit set (initiative) id. The provider assignment argument
   # policy_definition_id accepts either a definition or a set, so no further discrimination is needed.
@@ -32,6 +48,7 @@ locals {
         a.policy_definition_id,
         a.policy_set_definition_id,
       )
+      resolved_parameters = length(local.policy_assignment_parameters[k]) > 0 ? local.policy_assignment_parameters[k] : null
     })
   }
 
@@ -110,7 +127,7 @@ resource "azurerm_resource_group_policy_assignment" "this" {
   description          = each.value.description
   enforce              = each.value.enforcement_mode == "Default"
   not_scopes           = each.value.not_scopes
-  parameters           = each.value.parameters != null ? jsonencode(each.value.parameters) : null
+  parameters           = each.value.resolved_parameters != null ? jsonencode(each.value.resolved_parameters) : null
 
   dynamic "identity" {
     for_each = each.value.identity_type == "None" ? [] : [1]
@@ -133,7 +150,7 @@ resource "azurerm_subscription_policy_assignment" "this" {
   description          = each.value.description
   enforce              = each.value.enforcement_mode == "Default"
   not_scopes           = each.value.not_scopes
-  parameters           = each.value.parameters != null ? jsonencode(each.value.parameters) : null
+  parameters           = each.value.resolved_parameters != null ? jsonencode(each.value.resolved_parameters) : null
 
   dynamic "identity" {
     for_each = each.value.identity_type == "None" ? [] : [1]
@@ -156,7 +173,7 @@ resource "azurerm_management_group_policy_assignment" "this" {
   description          = each.value.description
   enforce              = each.value.enforcement_mode == "Default"
   not_scopes           = each.value.not_scopes
-  parameters           = each.value.parameters != null ? jsonencode(each.value.parameters) : null
+  parameters           = each.value.resolved_parameters != null ? jsonencode(each.value.resolved_parameters) : null
 
   dynamic "identity" {
     for_each = each.value.identity_type == "None" ? [] : [1]
