@@ -160,9 +160,20 @@ jobs:
           firewall-storage-resource-group: ${{ secrets.TFSTATE_RESOURCE_GROUP }}
           terraform-init-extra-args-json: '["-reconfigure","-upgrade","-backend-config=resource_group_name=${{ secrets.TFSTATE_RESOURCE_GROUP }}","-backend-config=storage_account_name=${{ secrets.TFSTATE_STORAGE_ACCOUNT }}","-backend-config=container_name=${{ secrets.TFSTATE_BLOB_CONTAINER }}"]'
 
+      # The apply runs long enough that the OIDC client assertion minted by the action's internal
+      # azure/login has expired (5 minute validity), and az cannot redeem an expired assertion for
+      # NEW resource tokens (the storage data-plane scope) even though cached ARM tokens keep
+      # working. Log in again so the upload gets fresh credentials.
+      - name: Azure login for the upload (fresh OIDC assertion)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
       # The apply created the private package account with the .zip blobs still to come (the Guest
-      # Configuration agents retry the download, so upload order is safe). az login state persists
-      # from the action's azure/login. The account name mirrors the complete example's local:
+      # Configuration agents retry the download, so upload order is safe). The account name mirrors
+      # the complete example's local:
       # stldo<loc>mc + the first 8 of sha1(subscription id). The upload needs the storage firewall
       # dance (temporary runner IP allow-list) and rides the Storage Blob Data Contributor grant the
       # stack itself applied; a short retry absorbs data-plane RBAC propagation lag.
