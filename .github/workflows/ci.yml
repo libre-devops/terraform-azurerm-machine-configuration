@@ -228,7 +228,9 @@ jobs:
             elseif ($vm -like 'vm-lnx-*') { $targets += @{ Vm = $vm; Assignment = 'NginxHardening' } }
           }
           if ($targets.Count -ne 2) { throw "Expected the Windows and Linux VMs in $env:PKG_SA_RG, found: $($vms -join ', ')" }
-          $deadline = (Get-Date).AddMinutes(25)
+          # ApplyAndAutoCorrect needs an audit, a set, and a re-report cycle (about 15 minutes each
+          # consistency pass), so give it a longer window than a plain audit would need.
+          $deadline = (Get-Date).AddMinutes(35)
           $status = @{}
           while ((Get-Date) -lt $deadline) {
             foreach ($t in $targets) {
@@ -240,9 +242,28 @@ jobs:
             if (@($status.Values) -notcontains 'Pending' -and @($status.Values) -notcontains 'Unknown' -and @($status.Values) -notcontains 'NonCompliant') { break }
             Start-Sleep -Seconds 120
           }
+          # Whatever the outcome, print each assignment's latest report with the per resource
+          # compliance and reason phrases: when a package finishes NonCompliant this is the only
+          # diagnostic that says WHICH control failed and why (the stack is destroyed right after).
+          foreach ($t in $targets) {
+            $repsUri = "https://management.azure.com/subscriptions/$sub/resourceGroups/$env:PKG_SA_RG/providers/Microsoft.Compute/virtualMachines/$($t.Vm)/providers/Microsoft.GuestConfiguration/guestConfigurationAssignments/$($t.Assignment)/reports?api-version=$env:GC_API_VERSION"
+            $reps = az rest --method GET --url $repsUri -o json 2>$null | ConvertFrom-Json
+            $latest = @($reps.value | Sort-Object { $_.properties.endTime } -Descending)[0]
+            if (-not $latest) { Write-LdoLog -Level WARN -Message "$($t.Assignment): no reports available."; continue }
+            $rep = az rest --method GET --url "https://management.azure.com$($latest.id)?api-version=$env:GC_API_VERSION" -o json 2>$null | ConvertFrom-Json
+            $resources = @($rep.properties.details.resources)
+            $failed = @($resources | Where-Object { $_.complianceStatus -ne $true })
+            Write-LdoLog -Level INFO -Message "$($t.Assignment): report $($rep.properties.details.jobId) end $($rep.properties.endTime), $($resources.Count) resources, $($failed.Count) non compliant."
+            foreach ($r in $failed) {
+              $rid = if ($r.properties -and $r.properties.ResourceId) { $r.properties.ResourceId } else { 'unknown resource' }
+              $phrase = (@($r.reasons | ForEach-Object { $_.phrase }) -join ' | ')
+              if ($phrase.Length -gt 600) { $phrase = $phrase.Substring(0, 600) + '...' }
+              Write-LdoLog -Level WARN -Message "NONCOMPLIANT [$($t.Assignment)] ${rid}: $phrase"
+            }
+          }
           $bad = @($status.GetEnumerator() | Where-Object { $_.Value -eq 'NonCompliant' })
           if ($bad.Count -gt 0) {
-            throw "Assignments finished NonCompliant: $(($bad | ForEach-Object { $_.Key }) -join ', '). The package audit/set logic needs fixing."
+            throw "Assignments finished NonCompliant: $(($bad | ForEach-Object { $_.Key }) -join ', '). See the NONCOMPLIANT report lines above for the failing controls."
           }
           $pending = @($status.GetEnumerator() | Where-Object { $_.Value -ne 'Compliant' })
           if ($pending.Count -gt 0) {
