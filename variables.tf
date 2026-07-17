@@ -22,6 +22,14 @@ variable "guest_configuration_extensions" {
     condition     = alltrue([for e in values(var.guest_configuration_extensions) : contains(["Windows", "Linux"], e.os_type)])
     error_message = "Each guest_configuration_extensions[*].os_type must be either \"Windows\" or \"Linux\"."
   }
+
+  validation {
+    condition = alltrue([
+      for e in values(var.guest_configuration_extensions) :
+      can(regex("(?i)^/subscriptions/[^/]+/resourceGroups/[^/]+/providers/Microsoft\\.Compute/virtualMachines/[^/]+$", e.virtual_machine_id))
+    ])
+    error_message = "Each guest_configuration_extensions[*].virtual_machine_id must be the full virtual machine RESOURCE id (/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.Compute/virtualMachines/<name>). Beware the azurerm VM resource's virtual_machine_id attribute (the LDO vm modules' virtual_machine_ids output): that is the compute fabric GUID and will not parse. Pass the VM resource id (the vm modules' ids output) instead."
+  }
 }
 
 variable "machine_configuration_assignments" {
@@ -68,6 +76,14 @@ variable "machine_configuration_assignments" {
       a.content_hash == null ? true : can(regex("^[A-F0-9]{64}$", a.content_hash))
     ])
     error_message = "content_hash must be an UPPERCASE 64 character hex SHA256 (the SH256SUM of the .zip in upper case)."
+  }
+
+  validation {
+    condition = alltrue([
+      for a in values(var.machine_configuration_assignments) :
+      can(regex("(?i)^/subscriptions/[^/]+/resourceGroups/[^/]+/providers/Microsoft\\.Compute/virtualMachines/[^/]+$", a.virtual_machine_id))
+    ])
+    error_message = "Each machine_configuration_assignments[*].virtual_machine_id must be the full virtual machine RESOURCE id (/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.Compute/virtualMachines/<name>). Beware the azurerm VM resource's virtual_machine_id attribute (the LDO vm modules' virtual_machine_ids output): that is the compute fabric GUID and will not parse. Pass the VM resource id (the vm modules' ids output) instead."
   }
 }
 

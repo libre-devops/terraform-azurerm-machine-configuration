@@ -37,7 +37,7 @@ locals {
     var.iis_package_hash != "" ? {
       iis_hardening = {
         name               = "IISHardening"
-        virtual_machine_id = module.windows_vm.virtual_machine_ids[local.win_name]
+        virtual_machine_id = module.windows_vm.ids[local.win_name]
         location           = local.location
         assignment_type    = "ApplyAndAutoCorrect"
         content_uri        = local.iis_content_uri
@@ -48,7 +48,7 @@ locals {
     var.nginx_package_hash != "" ? {
       nginx_hardening = {
         name               = "NginxHardening"
-        virtual_machine_id = module.linux_vm.virtual_machine_ids[local.lnx_name]
+        virtual_machine_id = module.linux_vm.ids[local.lnx_name]
         location           = local.location
         assignment_type    = "ApplyAndAutoCorrect"
         content_uri        = local.nginx_content_uri
@@ -329,11 +329,11 @@ module "machine_configuration" {
 
   guest_configuration_extensions = {
     AzurePolicyforWindows = {
-      virtual_machine_id = module.windows_vm.virtual_machine_ids[local.win_name]
+      virtual_machine_id = module.windows_vm.ids[local.win_name]
       os_type            = "Windows"
     }
     AzurePolicyforLinux = {
-      virtual_machine_id = module.linux_vm.virtual_machine_ids[local.lnx_name]
+      virtual_machine_id = module.linux_vm.ids[local.lnx_name]
       os_type            = "Linux"
     }
   }

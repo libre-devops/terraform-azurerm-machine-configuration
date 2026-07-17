@@ -76,7 +76,7 @@ module "machine_configuration" {
 
   guest_configuration_extensions = {
     AzurePolicyforLinux = {
-      virtual_machine_id = module.linux_vm.virtual_machine_ids[local.vm_name]
+      virtual_machine_id = module.linux_vm.ids[local.vm_name]
       os_type            = "Linux"
     }
   }
