@@ -96,17 +96,17 @@ jobs:
 
       # pwsh 7.3+ stopped bundling libmi.so, which the PSDesiredStateConfiguration 2.0.7
       # Configuration compile (and the GuestConfiguration MOF handling) still dlopen from the pwsh
-      # home directory. Borrow the library from the last PowerShell 7.2 LTS release, the accepted
-      # workaround from PowerShell-DSC-for-Linux issue 913. Provisioned once; later steps inherit.
+      # home directory. The 7.2 LTS copy is linked against OpenSSL 1.0 and cannot load on Ubuntu
+      # 24.04, so take the library from the OMI project's OpenSSL 3 build instead (libmi IS OMI's
+      # client library). Provisioned once; later steps inherit it.
       - name: Provision libmi for the DSC compile
         run: |
           set -euo pipefail
-          curl -sSL -o /tmp/pwsh72.tar.gz https://github.com/PowerShell/PowerShell/releases/download/v7.2.24/powershell-7.2.24-linux-x64.tar.gz
-          mkdir -p /tmp/pwsh72
-          tar -xzf /tmp/pwsh72.tar.gz -C /tmp/pwsh72
+          curl -sSL -o /tmp/omi.deb https://github.com/microsoft/omi/releases/download/v1.9.1-0/omi-1.9.1-0.ssl_300.ulinux.s.x64.deb
+          sudo dpkg -i /tmp/omi.deb
           PWSH_HOME="$(dirname "$(readlink -f "$(command -v pwsh)")")"
-          sudo cp "$(find /tmp/pwsh72 -name libmi.so | head -1)" "${PWSH_HOME}/libmi.so"
-          echo "libmi.so provisioned into ${PWSH_HOME}"
+          sudo cp "$(find /opt/omi -name libmi.so | head -1)" "${PWSH_HOME}/libmi.so"
+          echo "libmi.so (OMI 1.9.1, OpenSSL 3) provisioned into ${PWSH_HOME}"
 
       # The DSC packages compile and build ONLY here: the GuestConfiguration module needs Ubuntu,
       # so their first real validation is always this job. Windows content compiles against
