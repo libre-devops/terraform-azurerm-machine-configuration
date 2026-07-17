@@ -99,7 +99,10 @@ resource "azurerm_policy_virtual_machine_configuration_assignment" "this" {
     assignment_type = each.value.assignment_type
     content_uri     = each.value.content_uri
     content_hash    = each.value.content_hash
-    version         = each.value.version
+    # The service REJECTS a custom package assignment (content_uri set) whose version is null,
+    # empty, or whitespace (caught live: 400 "guestConfiguration properties version"); built in
+    # baselines accept a null version (latest). Default custom packages to 1.0.0.
+    version = each.value.content_uri != null ? coalesce(each.value.version, "1.0.0") : each.value.version
 
     dynamic "parameter" {
       for_each = each.value.parameters

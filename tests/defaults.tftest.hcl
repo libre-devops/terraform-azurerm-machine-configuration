@@ -85,6 +85,11 @@ run "onboards_and_assigns_windows_and_linux" {
   }
 
   assert {
+    condition     = azurerm_policy_virtual_machine_configuration_assignment.this["iis_custom"].configuration[0].version == "1.0.0"
+    error_message = "A custom package assignment without an explicit version should default to 1.0.0 (the service rejects custom assignments with a null version)."
+  }
+
+  assert {
     condition     = azurerm_resource_group_policy_assignment.this["linux_cis"].policy_definition_id == "/providers/Microsoft.Authorization/policyDefinitions/a3be3bae-0be0-4903-a924-edb7375c1d2e"
     error_message = "The linux_cis builtin key should resolve to the verified CIS Linux definition id."
   }

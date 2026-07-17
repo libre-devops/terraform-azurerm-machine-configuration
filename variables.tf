@@ -37,7 +37,8 @@ variable "machine_configuration_assignments" {
     Per machine (guest configuration) assignments, keyed by a stable name. Onboard a specific
     virtual machine to a built in baseline (for example AzureWindowsBaseline or AzureLinuxBaseline,
     leaving content_uri and content_hash unset) or to a custom DSC package (both content_uri and
-    content_hash required; content_hash is the UPPERCASE SHA256 of the .zip). assignment_type
+    content_hash required; content_hash is the UPPERCASE SHA256 of the .zip; the service requires a
+    version for custom packages, so the module defaults it to 1.0.0 when unset). assignment_type
     defaults to Audit (the safe default); ApplyAndAutoCorrect enforces continuously. The referenced
     virtual machine must already carry the Guest Configuration extension (see
     guest_configuration_extensions) and a system assigned identity.
