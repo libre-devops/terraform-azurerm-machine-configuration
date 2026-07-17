@@ -25,7 +25,7 @@ locals {
   package_container = "packages"
   iis_blob          = "iis-hardening.zip"
   nginx_blob        = "nginx-hardening.zip"
-  pkg_sa_name       = "stldo${var.loc}mc${random_string.pkg.result}"
+  pkg_sa_name       = "stldo${var.loc}mc${substr(sha1(data.azurerm_client_config.current.subscription_id), 0, 8)}"
   pkg_blob_base     = "${module.package_storage.primary_blob_endpoints[local.pkg_sa_name]}${local.package_container}"
   iis_content_uri   = "${local.pkg_blob_base}/${local.iis_blob}${data.azurerm_storage_account_blob_container_sas.packages.sas}"
   nginx_content_uri = "${local.pkg_blob_base}/${local.nginx_blob}${data.azurerm_storage_account_blob_container_sas.packages.sas}"
@@ -219,17 +219,10 @@ module "ssh_key" {
 # deny by default network rules). The VM subnet reaches it over the Microsoft.Storage service endpoint
 # (network), and a read only container SAS in the content URI authorises the download (authz); no
 # public blob access. The per-VM assignment resource has no identity argument, so a SAS is the private
-# option here (managed identity download is only wireable on the policy-definition path). The random
-# suffix keeps the globally unique account name from colliding; CI uploads the .zips after apply
-# through the storage firewall dance. Torn down with the resource group.
-resource "random_string" "pkg" {
-  length  = 8
-  lower   = true
-  upper   = false
-  numeric = true
-  special = false
-}
-
+# option here (managed identity download is only wireable on the policy-definition path). The account
+# name suffix is hashed from the subscription id: globally unique enough while staying known at plan
+# (a random_string result is unknown at plan and would poison the storage_accounts for_each keys).
+# CI uploads the .zips after apply through the storage firewall dance. Torn down with the resource group.
 module "package_storage" {
   source  = "libre-devops/storage-account/azurerm"
   version = "~> 4.0"

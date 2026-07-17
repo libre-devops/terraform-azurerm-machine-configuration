@@ -30,7 +30,7 @@ output "package_resource_group_name" {
 # firewall dance, since the account is private) to the blobs the assignments reference.
 output "package_storage_account_name" {
   description = "Name of the private storage account hosting the DSC packages."
-  value       = module.package_storage.names[local.pkg_sa_name]
+  value       = one(module.package_storage.names)
 }
 
 output "policy_assignments" {
