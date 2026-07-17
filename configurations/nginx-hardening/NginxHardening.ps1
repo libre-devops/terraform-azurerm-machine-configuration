@@ -1,8 +1,7 @@
 # CIS NGINX Benchmark, Level 1 (v2.1.0), as a PowerShell DSC configuration for an Azure Machine
-# Configuration package on Linux (PSDSC v3, nxtools resources). Compile with the
-# PSDesiredStateConfiguration 3.0.0 prerelease and nxtools, build with
-# New-GuestConfigurationPackage -Type AuditAndSet, and assign with ApplyAndAutoCorrect to enforce and
-# continuously drift correct.
+# Configuration package on Linux (nxtools resources). Compile with PSDesiredStateConfiguration 2.0.7,
+# build with New-GuestConfigurationPackage -Type AuditAndSet, and assign with ApplyAndAutoCorrect to
+# enforce and continuously drift correct.
 #
 # Design (honest about what can be enforced safely and idempotently on a generic host):
 #   - The package ensures nginx is installed, so it is self contained and provable on a clean VM.
@@ -10,14 +9,31 @@
 #     which the stock nginx.conf includes inside http { }. One managed file is idempotent and keeps
 #     the directives in the right context (re-running never stacks duplicates).
 #   - Filesystem, account, log rotation, key permission and DH parameter controls are nxScript
-#     check-and-set resources; each TestScript exits 0 when compliant and non-zero when a Set is
-#     needed, and every config-touching Set finishes with `nginx -t` and rolls back on failure.
+#     check-and-set resources. nxScript executes its Test/Set/Get strings as POWERSHELL
+#     (scriptblock::Create, live-caught when raw bash failed to deploy with "Missing type name
+#     after '['"), so each bash body below is wrapped at COMPILE time: the wrapper base64 encodes
+#     the bash and, on the machine, decodes it and pipes it to bash over stdin. Base64 sidesteps
+#     every quoting hazard, TestScript returns the strict [bool] nxtools demands, and SetScript
+#     throws the bash output on a non-zero exit. GetScript is intentionally omitted: nxtools then
+#     reports a canned reason instead of throwing on a non-hashtable return.
 #   - A few controls are server or location scoped (HTTP to HTTPS redirect 4.1.1, reject unknown host
 #     2.4.2, approved methods 5.1.2) and cannot be force injected without knowing the site's server
 #     blocks; forcing them risks breaking `nginx -t`. They ship as a documented, ready to include
 #     snippet at /etc/nginx/snippets/cis-l1-server.conf and are audited, not auto-wired. Ubuntu
 #     deltas (www-data service account, /run/nginx.pid, conf.d layout, logrotate) are baked in.
 # Value basis: CIS NGINX Benchmark v2.1.0 Level 1.
+
+function ConvertTo-BashTestScript {
+    param([Parameter(Mandatory)][string]$Bash)
+    $b64 = [System.Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($Bash))
+    "`$null = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('$b64')) | bash 2>&1; `$LASTEXITCODE -eq 0"
+}
+
+function ConvertTo-BashSetScript {
+    param([Parameter(Mandatory)][string]$Bash)
+    $b64 = [System.Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($Bash))
+    "`$out = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('$b64')) | bash 2>&1; if (`$LASTEXITCODE -ne 0) { throw ([string]`$out) }"
+}
 
 Configuration NginxHardening {
 
@@ -109,152 +125,144 @@ if ($request_method !~ ^(GET|HEAD|POST)$) { return 444; }
 
         # 2.2.2 (L1) The nginx service account is locked.
         nxScript ServiceAccountLocked_2_2_2 {
-            GetScript  = 'echo "www-data account lock state"'
-            TestScript = @'
+            TestScript = (ConvertTo-BashTestScript @'
 acct=$(awk '$1=="user"{print $2}' /etc/nginx/nginx.conf | tr -d ';' | head -1)
 [ -z "$acct" ] && acct=www-data
 st=$(passwd -S "$acct" 2>/dev/null | awk '{print $2}')
 [ "$st" = "L" ] && exit 0 || exit 1
-'@
-            SetScript  = @'
+'@)
+            SetScript  = (ConvertTo-BashSetScript @'
 acct=$(awk '$1=="user"{print $2}' /etc/nginx/nginx.conf | tr -d ';' | head -1)
 [ -z "$acct" ] && acct=www-data
 passwd -l "$acct"
-'@
+'@)
             DependsOn  = '[nxPackage]Nginx'
         }
 
         # 2.2.3 (L1) The nginx service account has an invalid shell.
         nxScript ServiceAccountShell_2_2_3 {
-            GetScript  = 'echo "www-data shell"'
-            TestScript = @'
+            TestScript = (ConvertTo-BashTestScript @'
 acct=$(awk '$1=="user"{print $2}' /etc/nginx/nginx.conf | tr -d ';' | head -1)
 [ -z "$acct" ] && acct=www-data
 sh=$(getent passwd "$acct" | cut -d: -f7)
 case "$sh" in /usr/sbin/nologin|/sbin/nologin|/bin/false) exit 0;; *) exit 1;; esac
-'@
-            SetScript  = @'
+'@)
+            SetScript  = (ConvertTo-BashSetScript @'
 acct=$(awk '$1=="user"{print $2}' /etc/nginx/nginx.conf | tr -d ';' | head -1)
 [ -z "$acct" ] && acct=www-data
 usermod -s /usr/sbin/nologin "$acct"
-'@
+'@)
             DependsOn  = '[nxPackage]Nginx'
         }
 
         # 2.3.1 (L1) /etc/nginx tree owned by root:root.
         nxScript OwnershipRoot_2_3_1 {
-            GetScript  = 'echo "etc nginx ownership"'
-            TestScript = @'
+            TestScript = (ConvertTo-BashTestScript @'
 out=$(find /etc/nginx \( ! -user root -o ! -group root \) -print 2>/dev/null)
 [ -z "$out" ] && exit 0 || exit 1
-'@
-            SetScript  = 'find /etc/nginx -exec chown root:root {} +'
+'@)
+            SetScript  = (ConvertTo-BashSetScript 'find /etc/nginx -exec chown root:root {} +')
             DependsOn  = '[nxPackage]Nginx'
         }
 
         # 2.3.2 (L1) Restrict access to /etc/nginx: no group/other write on dirs, no other access or
         # execute on files. Directories go-w, files ug-x and o-rwx (that restrictive or more).
         nxScript Permissions_2_3_2 {
-            GetScript  = 'echo "etc nginx permissions"'
-            TestScript = @'
+            TestScript = (ConvertTo-BashTestScript @'
 d=$(find /etc/nginx -type d -perm /022 -print 2>/dev/null)
 f=$(find /etc/nginx -type f -perm /0137 -print 2>/dev/null)
 [ -z "$d" ] && [ -z "$f" ] && exit 0 || exit 1
-'@
-            SetScript  = @'
+'@)
+            SetScript  = (ConvertTo-BashSetScript @'
 find /etc/nginx -type d -exec chmod go-w {} +
 find /etc/nginx -type f -exec chmod ug-x,o-rwx {} +
-'@
+'@)
             DependsOn  = '[nxPackage]Nginx'
         }
 
         # 2.3.3 (L1) Secure the PID file (root:root, no group/other write or execute).
         nxScript PidFile_2_3_3 {
-            GetScript  = 'echo "pid file perms"'
-            TestScript = @'
+            TestScript = (ConvertTo-BashTestScript @'
 p=/run/nginx.pid; [ -f "$p" ] || p=/var/run/nginx.pid
 [ -f "$p" ] || exit 0
 info=$(stat -Lc "%U:%G %a" "$p")
 own=${info% *}; mode=${info#* }
 [ "$own" = "root:root" ] && [ "$mode" -le 644 ] && exit 0 || exit 1
-'@
-            SetScript  = @'
+'@)
+            SetScript  = (ConvertTo-BashSetScript @'
 p=/run/nginx.pid; [ -f "$p" ] || p=/var/run/nginx.pid
 [ -f "$p" ] || exit 0
 chown root:root "$p"; chmod u-x,go-wx "$p"
-'@
+'@)
             DependsOn  = '[nxPackage]Nginx'
         }
 
         # 2.5.2 (L1) Default pages do not reference nginx.
         nxScript StripBranding_2_5_2 {
-            GetScript  = 'echo "default page branding"'
-            TestScript = @'
+            TestScript = (ConvertTo-BashTestScript @'
 hit=$(grep -il nginx /usr/share/nginx/html/index.html /usr/share/nginx/html/50x.html /var/www/html/index.nginx-debian.html 2>/dev/null)
 [ -z "$hit" ] && exit 0 || exit 1
-'@
-            SetScript  = @'
+'@)
+            SetScript  = (ConvertTo-BashSetScript @'
 for f in /usr/share/nginx/html/index.html /usr/share/nginx/html/50x.html /var/www/html/index.nginx-debian.html; do
   [ -f "$f" ] && printf "<!doctype html><title>Service</title><h1>Service</h1>\n" > "$f"
 done
-'@
+true
+'@)
             DependsOn  = '[nxPackage]Nginx'
         }
 
         # 3.4 (L1) Log files are rotated (weekly, keep 13).
         nxScript LogRotate_3_4 {
-            GetScript  = 'echo "logrotate nginx"'
-            TestScript = @'
+            TestScript = (ConvertTo-BashTestScript @'
 f=/etc/logrotate.d/nginx
 [ -f "$f" ] || exit 1
 grep -Eq '^\s*weekly' "$f" && grep -Eq '^\s*rotate\s+13' "$f" && exit 0 || exit 1
-'@
-            SetScript  = @'
+'@)
+            SetScript  = (ConvertTo-BashSetScript @'
 f=/etc/logrotate.d/nginx
 [ -f "$f" ] || exit 0
 grep -Eq '(daily|weekly|monthly)' "$f" && sed -i -E 's/^\s*(daily|monthly)/\tweekly/' "$f" || sed -i '0,/{/s//{\n\tweekly/' "$f"
 grep -Eq '^\s*rotate\s+[0-9]+' "$f" && sed -i -E 's/^\s*rotate\s+[0-9]+/\trotate 13/' "$f" || sed -i '0,/{/s//{\n\trotate 13/' "$f"
-'@
+'@)
             DependsOn  = '[nxPackage]Nginx'
         }
 
         # 4.1.3 (L1) TLS private keys are root owned and mode 400 or more restrictive.
         nxScript PrivateKeyPerms_4_1_3 {
-            GetScript  = 'echo "tls key perms"'
-            TestScript = @'
+            TestScript = (ConvertTo-BashTestScript @'
 bad=$(find /etc/nginx/ /etc/ssl/private/ -name '*.key' 2>/dev/null -exec stat -Lc "%n %a %U" {} + | awk '$2>400 || $3!="root"{print}')
 [ -z "$bad" ] && exit 0 || exit 1
-'@
-            SetScript  = @'
+'@)
+            SetScript  = (ConvertTo-BashSetScript @'
 find /etc/nginx/ /etc/ssl/private/ -name '*.key' 2>/dev/null -exec chown root {} + -exec chmod u-wx,go-rwx {} +
-'@
+true
+'@)
             DependsOn  = '[nxPackage]Nginx'
         }
 
         # 4.1.6 (L1) Custom Diffie-Hellman parameters exist (>= 2048 bit), mode 400. Generated once.
         nxScript DhParams_4_1_6 {
-            GetScript  = 'echo "dhparam"'
-            TestScript = @'
+            TestScript = (ConvertTo-BashTestScript @'
 f=/etc/nginx/ssl/dhparam.pem
 [ -f "$f" ] || exit 1
 bits=$(openssl dhparam -in "$f" -text -noout 2>/dev/null | grep -oE '\(([0-9]+) bit\)' | grep -oE '[0-9]+' | head -1)
 [ -n "$bits" ] && [ "$bits" -ge 2048 ] && exit 0 || exit 1
-'@
-            SetScript  = @'
+'@)
+            SetScript  = (ConvertTo-BashSetScript @'
 mkdir -p /etc/nginx/ssl
 openssl dhparam -out /etc/nginx/ssl/dhparam.pem 2048
 chown root:root /etc/nginx/ssl/dhparam.pem
 chmod 400 /etc/nginx/ssl/dhparam.pem
-'@
+'@)
             DependsOn  = '[nxPackage]Nginx'
         }
 
         # After the managed config lands, validate and reload; on `nginx -t` failure the config file
         # remains but this reports non-compliant so the run surfaces the problem.
         nxScript ValidateAndReload {
-            GetScript  = 'echo "nginx -t"'
-            TestScript = 'nginx -t >/dev/null 2>&1 && exit 0 || exit 1'
-            SetScript  = 'nginx -t && (systemctl reload nginx 2>/dev/null || nginx -s reload 2>/dev/null || true)'
+            TestScript = (ConvertTo-BashTestScript 'nginx -t >/dev/null 2>&1 && exit 0 || exit 1')
+            SetScript  = (ConvertTo-BashSetScript 'nginx -t && (systemctl reload nginx 2>/dev/null || nginx -s reload 2>/dev/null || true)')
             DependsOn  = '[nxFile]CisHardeningConf'
         }
     }
