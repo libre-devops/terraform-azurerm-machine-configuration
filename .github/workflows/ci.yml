@@ -109,11 +109,13 @@ jobs:
           echo "libmi.so (OMI 1.9.1, OpenSSL 3) provisioned into ${PWSH_HOME}"
 
       # The DSC packages compile and build ONLY here: the GuestConfiguration module needs Ubuntu,
-      # so their first real validation is always this job. Windows content compiles against
-      # PSDesiredStateConfiguration 2.0.7 and Linux content against the 3.0.0 prerelease, so each
-      # package builds in its own step (fresh pwsh session) to keep the module sets apart. The
-      # hashes feed the apply through TF_VAR so the complete example gates the custom
-      # ApplyAndAutoCorrect assignments on.
+      # so their first real validation is always this job. BOTH packages compile against
+      # PSDesiredStateConfiguration 2.0.7: the classic engine compiles nxtools' class based
+      # resources to an equivalent MOF (verified by diff), whereas the 3.0.0-beta1 class loader
+      # breaks as soon as the GuestConfiguration module is co-loaded in the session (its bundled
+      # DSC assemblies poison the v3 CIM class cache). Each package still builds in its own step
+      # for failure isolation. The hashes feed the apply through TF_VAR so the complete example
+      # gates the custom ApplyAndAutoCorrect assignments on.
       - name: Build the IIS hardening package (Windows DSC)
         shell: pwsh
         run: |
@@ -130,12 +132,12 @@ jobs:
           "TF_VAR_iis_package_hash=$hash" | Out-File -FilePath $env:GITHUB_ENV -Append
           "IIS_PKG_ZIP=$(Join-Path $dest 'iis-hardening.zip')" | Out-File -FilePath $env:GITHUB_ENV -Append
 
-      - name: Build the Nginx hardening package (PSDSC v3)
+      - name: Build the Nginx hardening package (nxtools)
         shell: pwsh
         run: |
           Import-Module LibreDevOpsHelpers
           Install-LdoGuestConfigurationModule -IncludeLinuxResources $true
-          Import-Module PSDesiredStateConfiguration -RequiredVersion 3.0.0
+          Import-Module PSDesiredStateConfiguration -RequiredVersion 2.0.7
           $zip = New-LdoMachineConfigPackage -ConfigurationScript ./configurations/nginx-hardening/NginxHardening.ps1 -Name NginxHardening -Type AuditAndSet
           $hash = Get-LdoMachineConfigPackageHash -ZipPath $zip
           $dest = Join-Path $env:RUNNER_TEMP 'packages'
