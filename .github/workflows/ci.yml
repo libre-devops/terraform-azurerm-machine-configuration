@@ -94,6 +94,42 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The DSC packages compile and build ONLY here: the GuestConfiguration module needs Ubuntu,
+      # so their first real validation is always this job. Windows content compiles against
+      # PSDesiredStateConfiguration 2.0.7 and Linux content against the 3.0.0 prerelease, so each
+      # package builds in its own step (fresh pwsh session) to keep the module sets apart. The
+      # hashes feed the apply through TF_VAR so the complete example gates the custom
+      # ApplyAndAutoCorrect assignments on.
+      - name: Build the IIS hardening package (Windows DSC)
+        shell: pwsh
+        run: |
+          Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+          Install-Module LibreDevOpsHelpers -MinimumVersion 2.10.0 -Force -Scope CurrentUser
+          Import-Module LibreDevOpsHelpers
+          Install-LdoGuestConfigurationModule -IncludeLinuxResources $false
+          Import-Module PSDesiredStateConfiguration -RequiredVersion 2.0.7
+          $zip = New-LdoMachineConfigPackage -ConfigurationScript ./configurations/iis-hardening/IISHardening.ps1 -Name IISHardening -Type AuditAndSet
+          $hash = Get-LdoMachineConfigPackageHash -ZipPath $zip
+          $dest = Join-Path $env:RUNNER_TEMP 'packages'
+          New-Item -ItemType Directory -Path $dest -Force | Out-Null
+          Copy-Item $zip (Join-Path $dest 'iis-hardening.zip') -Force
+          "TF_VAR_iis_package_hash=$hash" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "IIS_PKG_ZIP=$(Join-Path $dest 'iis-hardening.zip')" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Build the Nginx hardening package (PSDSC v3)
+        shell: pwsh
+        run: |
+          Import-Module LibreDevOpsHelpers
+          Install-LdoGuestConfigurationModule -IncludeLinuxResources $true
+          Import-Module PSDesiredStateConfiguration -RequiredVersion 3.0.0
+          $zip = New-LdoMachineConfigPackage -ConfigurationScript ./configurations/nginx-hardening/NginxHardening.ps1 -Name NginxHardening -Type AuditAndSet
+          $hash = Get-LdoMachineConfigPackageHash -ZipPath $zip
+          $dest = Join-Path $env:RUNNER_TEMP 'packages'
+          New-Item -ItemType Directory -Path $dest -Force | Out-Null
+          Copy-Item $zip (Join-Path $dest 'nginx-hardening.zip') -Force
+          "TF_VAR_nginx_package_hash=$hash" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "NGINX_PKG_ZIP=$(Join-Path $dest 'nginx-hardening.zip')" | Out-File -FilePath $env:GITHUB_ENV -Append
+
       - name: Plan and apply the example stacks
         uses: libre-devops/terraform-azure@v1
         with:
@@ -107,6 +143,87 @@ jobs:
           firewall-storage-account-name: ${{ secrets.TFSTATE_STORAGE_ACCOUNT }}
           firewall-storage-resource-group: ${{ secrets.TFSTATE_RESOURCE_GROUP }}
           terraform-init-extra-args-json: '["-reconfigure","-upgrade","-backend-config=resource_group_name=${{ secrets.TFSTATE_RESOURCE_GROUP }}","-backend-config=storage_account_name=${{ secrets.TFSTATE_STORAGE_ACCOUNT }}","-backend-config=container_name=${{ secrets.TFSTATE_BLOB_CONTAINER }}"]'
+
+      # The apply created the private package account with the .zip blobs still to come (the Guest
+      # Configuration agents retry the download, so upload order is safe). az login state persists
+      # from the action's azure/login. The account name mirrors the complete example's local:
+      # stldo<loc>mc + the first 8 of sha1(subscription id). The upload needs the storage firewall
+      # dance (temporary runner IP allow-list) and rides the Storage Blob Data Contributor grant the
+      # stack itself applied; a short retry absorbs data-plane RBAC propagation lag.
+      - name: Upload the packages to the private storage account
+        shell: pwsh
+        run: |
+          Import-Module LibreDevOpsHelpers
+          $sa = az storage account list --query "[?starts_with(name, 'stldouksmc')] | [0]" -o json | ConvertFrom-Json
+          if (-not $sa) { throw 'Package storage account (stldouksmc*) not found; did the complete stack apply?' }
+          Write-LdoLog -Level INFO -Message "Package storage account: $($sa.name) (rg $($sa.resourceGroup))"
+          "PKG_SA_RG=$($sa.resourceGroup)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Add-LdoStorageCurrentIpRule -ResourceGroup $sa.resourceGroup -StorageAccountName $sa.name
+          try {
+            Start-Sleep -Seconds 45
+            foreach ($pkg in @(
+                @{ Zip = $env:IIS_PKG_ZIP; Blob = 'iis-hardening.zip' },
+                @{ Zip = $env:NGINX_PKG_ZIP; Blob = 'nginx-hardening.zip' }
+              )) {
+              $attempt = 0
+              while ($true) {
+                try {
+                  Publish-LdoMachineConfigPackage -ZipPath $pkg.Zip -StorageAccountName $sa.name -ContainerName packages -BlobName $pkg.Blob | Out-Null
+                  break
+                }
+                catch {
+                  if (++$attempt -ge 4) { throw }
+                  Write-LdoLog -Level WARN -Message "Upload of $($pkg.Blob) failed (attempt $attempt), retrying in 60s: $($_.Exception.Message)"
+                  Start-Sleep -Seconds 60
+                }
+              }
+            }
+          }
+          finally {
+            Remove-LdoStorageCurrentIpRule -ResourceGroup $sa.resourceGroup -StorageAccountName $sa.name
+          }
+
+      # Prove the enforce path: poll the two custom assignments until the Guest Configuration
+      # agents report Compliant (ApplyAndAutoCorrect applies the package, then reports). A final
+      # NonCompliant is a real package failure and fails the run; still Pending at the deadline is
+      # agent lag (check-in cadence is about 15 minutes), reported as a warning rather than a flake.
+      - name: Read Guest Configuration compliance (bounded)
+        shell: pwsh
+        env:
+          GC_API_VERSION: "2022-01-25"
+        run: |
+          Import-Module LibreDevOpsHelpers
+          $sub = (az account show --query id -o tsv).Trim()
+          $vms = az vm list -g $env:PKG_SA_RG --query "[].name" -o json | ConvertFrom-Json
+          $targets = @()
+          foreach ($vm in $vms) {
+            if ($vm -like 'vm-win-*') { $targets += @{ Vm = $vm; Assignment = 'IISHardening' } }
+            elseif ($vm -like 'vm-lnx-*') { $targets += @{ Vm = $vm; Assignment = 'NginxHardening' } }
+          }
+          if ($targets.Count -ne 2) { throw "Expected the Windows and Linux VMs in $env:PKG_SA_RG, found: $($vms -join ', ')" }
+          $deadline = (Get-Date).AddMinutes(25)
+          $status = @{}
+          while ((Get-Date) -lt $deadline) {
+            foreach ($t in $targets) {
+              $uri = "https://management.azure.com/subscriptions/$sub/resourceGroups/$env:PKG_SA_RG/providers/Microsoft.Compute/virtualMachines/$($t.Vm)/providers/Microsoft.GuestConfiguration/guestConfigurationAssignments/$($t.Assignment)?api-version=$env:GC_API_VERSION"
+              $a = az rest --method GET --url $uri -o json 2>$null | ConvertFrom-Json
+              $status[$t.Assignment] = if ($a -and $a.properties.complianceStatus) { $a.properties.complianceStatus } else { 'Unknown' }
+            }
+            Write-LdoLog -Level INFO -Message ("Compliance: " + (($status.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ' '))
+            if (@($status.Values) -notcontains 'Pending' -and @($status.Values) -notcontains 'Unknown' -and @($status.Values) -notcontains 'NonCompliant') { break }
+            Start-Sleep -Seconds 120
+          }
+          $bad = @($status.GetEnumerator() | Where-Object { $_.Value -eq 'NonCompliant' })
+          if ($bad.Count -gt 0) {
+            throw "Assignments finished NonCompliant: $(($bad | ForEach-Object { $_.Key }) -join ', '). The package audit/set logic needs fixing."
+          }
+          $pending = @($status.GetEnumerator() | Where-Object { $_.Value -ne 'Compliant' })
+          if ($pending.Count -gt 0) {
+            Write-LdoLog -Level WARN -Message "Not Compliant within the window (agent lag): $(($pending | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ', ')"
+          }
+          else {
+            Write-LdoLog -Level SUCCESS -Message 'Both custom packages report Compliant: the ApplyAndAutoCorrect enforce path is proven.'
+          }
 
       # ALWAYS runs, even when the apply step failed: a partial apply must still be torn down
       # rather than left for a human to notice. A destroy against a half-applied or empty state

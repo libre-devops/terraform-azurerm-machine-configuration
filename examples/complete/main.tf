@@ -244,6 +244,23 @@ module "package_storage" {
   }
 }
 
+# The CI runner uploads the built .zip packages post-apply with az (auth-mode login), which needs a
+# data-plane role on the account alongside the temporary IP allow-list the upload step adds (the
+# storage firewall dance); management-plane roles alone cannot write blobs.
+module "pkg_storage_rbac" {
+  source  = "libre-devops/role-assignment/azurerm"
+  version = "~> 4.0"
+
+  role_assignments = {
+    pkg-blob-contributor = {
+      scope                            = module.package_storage.ids[local.pkg_sa_name]
+      principal_ids                    = [data.azurerm_client_config.current.object_id]
+      role_names                       = ["Storage Blob Data Contributor"]
+      skip_service_principal_aad_check = true
+    }
+  }
+}
+
 resource "azurerm_storage_container" "packages" {
   name                  = local.package_container
   storage_account_id    = module.package_storage.ids[local.pkg_sa_name]
