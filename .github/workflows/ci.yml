@@ -129,7 +129,10 @@ jobs:
           $dest = Join-Path $env:RUNNER_TEMP 'packages'
           New-Item -ItemType Directory -Path $dest -Force | Out-Null
           Copy-Item $zip (Join-Path $dest 'iis-hardening.zip') -Force
-          "TF_VAR_iis_package_hash=$hash" | Out-File -FilePath $env:GITHUB_ENV -Append
+          # The hash goes to a FILE, not GITHUB_ENV: the first apply must run WITHOUT the hashes
+          # (custom assignments gated off) so the blobs can be uploaded before any assignment
+          # exists; a later step promotes the hashes to TF_VAR for the second apply.
+          Set-Content -LiteralPath (Join-Path $dest 'iis.hash') -Value $hash -NoNewline
           "IIS_PKG_ZIP=$(Join-Path $dest 'iis-hardening.zip')" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Build the Nginx hardening package (nxtools)
@@ -143,10 +146,15 @@ jobs:
           $dest = Join-Path $env:RUNNER_TEMP 'packages'
           New-Item -ItemType Directory -Path $dest -Force | Out-Null
           Copy-Item $zip (Join-Path $dest 'nginx-hardening.zip') -Force
-          "TF_VAR_nginx_package_hash=$hash" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Set-Content -LiteralPath (Join-Path $dest 'nginx.hash') -Value $hash -NoNewline
           "NGINX_PKG_ZIP=$(Join-Path $dest 'nginx-hardening.zip')" | Out-File -FilePath $env:GITHUB_ENV -Append
 
-      - name: Plan and apply the example stacks
+      # Phase 1 of the two phase apply: everything EXCEPT the custom package assignments (the hash
+      # variables are unset, so the example gates them off). The Guest Configuration agent starts
+      # its initial deployment run within about five minutes of an assignment existing, so the
+      # blobs must be in the container BEFORE any assignment is created or the first download 404s
+      # and convergence waits on the slow consistency cadence.
+      - name: Plan and apply the example stacks (no custom assignments yet)
         uses: libre-devops/terraform-azure@v1
         with:
           terraform-code-location: examples
@@ -171,9 +179,8 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      # The apply created the private package account with the .zip blobs still to come (the Guest
-      # Configuration agents retry the download, so upload order is safe). The account name mirrors
-      # the complete example's local:
+      # Phase 1 created the private package account; stage the .zip blobs into it before any
+      # assignment exists. The account name mirrors the complete example's local:
       # stldo<loc>mc + the first 8 of sha1(subscription id). The upload needs the storage firewall
       # dance (temporary runner IP allow-list) and rides the Storage Blob Data Contributor grant the
       # stack itself applied; a short retry absorbs data-plane RBAC propagation lag.
@@ -210,10 +217,34 @@ jobs:
             Remove-LdoStorageCurrentIpRule -ResourceGroup $sa.resourceGroup -StorageAccountName $sa.name
           }
 
+      # Phase 2: with the blobs staged, promote the hashes to TF_VAR and apply the complete stack
+      # again, which adds ONLY the two custom package assignments. Their initial deployment run
+      # then downloads successfully on the first attempt.
+      - name: Gate the custom assignments on (promote hashes to TF_VAR)
+        shell: pwsh
+        run: |
+          $dest = Join-Path $env:RUNNER_TEMP 'packages'
+          "TF_VAR_iis_package_hash=$(Get-Content (Join-Path $dest 'iis.hash') -Raw)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "TF_VAR_nginx_package_hash=$(Get-Content (Join-Path $dest 'nginx.hash') -Raw)" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Apply the custom package assignments (complete stack, phase 2)
+        uses: libre-devops/terraform-azure@v1
+        with:
+          terraform-code-location: examples
+          terraform-stack-to-run-json: '["complete"]'
+          run-terraform-plan: true
+          run-terraform-apply: true
+          arm-client-id: ${{ vars.AZURE_CLIENT_ID }}
+          arm-tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          arm-subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          firewall-storage-account-name: ${{ secrets.TFSTATE_STORAGE_ACCOUNT }}
+          firewall-storage-resource-group: ${{ secrets.TFSTATE_RESOURCE_GROUP }}
+          terraform-init-extra-args-json: '["-reconfigure","-upgrade","-backend-config=resource_group_name=${{ secrets.TFSTATE_RESOURCE_GROUP }}","-backend-config=storage_account_name=${{ secrets.TFSTATE_STORAGE_ACCOUNT }}","-backend-config=container_name=${{ secrets.TFSTATE_BLOB_CONTAINER }}"]'
+
       # Prove the enforce path: poll the two custom assignments until the Guest Configuration
       # agents report Compliant (ApplyAndAutoCorrect applies the package, then reports). A final
       # NonCompliant is a real package failure and fails the run; still Pending at the deadline is
-      # agent lag (check-in cadence is about 15 minutes), reported as a warning rather than a flake.
+      # agent lag, reported as a warning rather than a flake.
       - name: Read Guest Configuration compliance (bounded)
         shell: pwsh
         env:
@@ -228,9 +259,10 @@ jobs:
             elseif ($vm -like 'vm-lnx-*') { $targets += @{ Vm = $vm; Assignment = 'NginxHardening' } }
           }
           if ($targets.Count -ne 2) { throw "Expected the Windows and Linux VMs in $env:PKG_SA_RG, found: $($vms -join ', ')" }
-          # ApplyAndAutoCorrect needs an audit, a set, and a re-report cycle (about 15 minutes each
-          # consistency pass), so give it a longer window than a plain audit would need.
-          $deadline = (Get-Date).AddMinutes(35)
+          # With the blobs staged before the assignments exist, the initial deployment run starts
+          # within about five minutes and set plus report follow directly; twenty minutes covers it
+          # without stretching the run when something is genuinely wrong.
+          $deadline = (Get-Date).AddMinutes(20)
           $status = @{}
           while ((Get-Date) -lt $deadline) {
             foreach ($t in $targets) {
